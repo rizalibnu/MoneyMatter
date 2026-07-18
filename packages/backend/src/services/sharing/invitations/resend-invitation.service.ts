@@ -178,13 +178,8 @@ const resendInvitationImpl = async (params: ResendInvitationParams): Promise<Res
 export const resendInvitation = async (params: ResendInvitationParams): Promise<ResendInvitationResult> => {
   const result = await withTransaction(resendInvitationImpl)(params);
 
-  // No invitee resolved → no email to send. The DB row + window slot were still updated;
-  // for callers, that counts as "delivered to the only audience that exists" so the flag
-  // stays true and the frontend doesn't surface a misleading warning.
-  if (result.inviteeUserId === null) {
-    return { invitation: result.invitation, emailDelivered: true };
-  }
-
+  // Send email regardless of whether the invitee has a MoneyMatter account yet.
+  // The invitation token in the email lets them accept after signing up.
   // Surface the email outcome to the caller — important because the rate-limit window
   // slot was already consumed in the impl, and a silent send failure would burn the
   // user's daily budget invisibly. `'skipped'` (Resend not configured in dev/test)
@@ -205,7 +200,8 @@ export const resendInvitation = async (params: ResendInvitationParams): Promise<
     // notification center, not just the in-flight API response toast. The rate-limit slot
     // was already burned in `resendInvitationImpl`, so silently swallowing this would let
     // owners exhaust their daily budget without realising no emails went out.
-    const invitee = await Users.findByPk(result.inviteeUserId);
+    const inviteeUserId = result.inviteeUserId;
+    const invitee = inviteeUserId ? await Users.findByPk(inviteeUserId) : null;
     await notifyInvitationSendFailed({
       ownerUserId: params.ownerUserId,
       invitee,
