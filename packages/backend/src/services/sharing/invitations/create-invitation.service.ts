@@ -310,17 +310,11 @@ const createInvitationImpl = async (params: CreateInvitationParams): Promise<Cre
 export const createInvitation = async (params: CreateInvitationParams): Promise<CreateInvitationResult> => {
   const result = await withTransaction(createInvitationImpl)(params);
 
-  // Email send is skipped for unresolved invitees — there's no outbound path for them
-  // yet (a future "sign up to accept" email will cover that). No invitee, no email
-  // failure mode for the caller to worry about.
-  if (!result.resolvedInvitee) {
-    return { invitation: result.invitation, emailDelivered: true };
-  }
-
-  // Post-commit side effects. Wrap so a transient Users lookup or notify failure can't
-  // reject the API call — the invitation row is already committed and the email-send
-  // outcome already has its own internal error handling. Anything that escapes here
-  // would otherwise present as a 500 to the caller despite a successfully created row.
+  // Post-commit side effects. Send email to the invitee regardless of whether they
+  // have a MoneyMatter account yet — the email contains the invitation token which
+  // lets them accept after signing up. Wrap so a transient Users lookup or notify
+  // failure can't reject the API call — the invitation row is already committed and
+  // the email-send outcome already has its own internal error handling.
   try {
     const owner = await Users.findByPk(params.ownerUserId);
     if (!owner) {
@@ -340,12 +334,11 @@ export const createInvitation = async (params: CreateInvitationParams): Promise<
       );
     }
     const ownerDisplayName = owner?.username ?? FALLBACK_OWNER_DISPLAY_NAME;
-    // Surface the email outcome up the call stack so the UI can warn when the row was
-    // created but the email actually failed (Resend down, etc.). `'skipped'` (Resend not
-    // configured in dev/test) counts as delivered for the user-facing flag — there's no
-    // failure for them to see.
+    // Always send the email — the invitee email is available from the invitation row.
+    // `result.invitation.inviteeEmail` is set by `createInvitationImpl` even when
+    // the invitee has no MoneyMatter account (resolvedInvitee is null).
     const outcome = await sendInvitationEmail({
-      toEmail: result.resolvedInvitee.email,
+      toEmail: result.invitation.inviteeEmail,
       ownerDisplayName,
       resourceType: result.invitation.resourceType,
       resourceName: result.resourceName,
@@ -359,12 +352,13 @@ export const createInvitation = async (params: CreateInvitationParams): Promise<
       // The API response already carries `emailDelivered: false`, but a single in-flight toast
       // is easy to miss. Drop a durable owner notification so the failed delivery surfaces in
       // the notification center even if the page is dismissed before the toast renders.
-      const invitee = await Users.findByPk(result.resolvedInvitee.userId);
+      const inviteeUserId = result.resolvedInvitee?.userId;
+      const invitee = inviteeUserId ? await Users.findByPk(inviteeUserId) : null;
       const notify = LIFECYCLE_NOTIFIERS.invitationSendFailed[result.invitation.resourceType];
       await notify({
         ownerUserId: params.ownerUserId,
         invitee,
-        inviteeEmail: result.resolvedInvitee.email,
+        inviteeEmail: result.invitation.inviteeEmail,
         invitationId: result.invitation.id,
         resource: {
           type: result.invitation.resourceType,
